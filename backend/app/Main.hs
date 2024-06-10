@@ -2,15 +2,17 @@
 
 module Main where
 
+import Control.Monad (when)
 import Data.Aeson
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Csv as C
+import Data.Either (isLeft)
 import Data.Text
 import Data.Text.Read (decimal)
 import Data.Time
 import qualified Data.Vector as V
 import Database.SQLite.Simple
-import Network.HTTP.Types
+import Network.HTTP.Types (status404)
 import Network.Wai.Middleware.Cors (simpleCors)
 import Network.Wai.Middleware.RequestLogger
 import Network.Wai.Middleware.Static
@@ -97,15 +99,15 @@ userTasks conn user = do
   r <- query conn "SELECT task, ninja, category, checked, id, timestamp FROM tasks WHERE ninja=?" (Only user) :: IO [Task]
   return $ TaskList r
 
-taskById :: Connection -> Int -> IO (Either Text Task)
+taskById :: Connection -> Int -> IO (Either AppError Task)
 taskById conn taskId = do
   r <- query conn "SELECT task, ninja, category, checked, id, timestamp FROM tasks WHERE id=?" (Only taskId) :: IO [Task]
-  return $ maybeToRight "Couldn't find task given id." (returnFirst r)
+  return $ maybeToRight (AppError "Couldn't find task given id.") (returnFirst r)
   where
     returnFirst (x : _) = Just x
     returnFirst _ = Nothing
 
-flipTask :: Connection -> Int -> Either Text Bool -> IO (Either Text Task)
+flipTask :: Connection -> Int -> Either Text Bool -> IO (Either AppError Task)
 flipTask conn taskId (Right checked) = do
   task <- taskById conn taskId
   case task of
@@ -113,7 +115,7 @@ flipTask conn taskId (Right checked) = do
       execute conn "UPDATE tasks SET checked = ? WHERE id = ?" [fromEnum checked, taskId]
       taskById conn taskId
     _ -> return task
-flipTask _ _ (Left x) = return $ Left x
+flipTask _ _ (Left x) = return $ Left $ AppError x
 
 textToBool :: Either String (Int, Text) -> Either Text Bool
 textToBool (Right (0, _)) = Right False
@@ -124,7 +126,7 @@ textToBool (Left x) = Left $ pack x
 dateToUTC :: String -> Either Text UTCTime
 dateToUTC date = maybeToRight "Couldn't parse date!" $ parseTimeM True defaultTimeLocale "%Y-%m-%d" date
 
-setTaskDate :: Connection -> Int -> Either Text UTCTime -> IO (Either Text Task)
+setTaskDate :: Connection -> Int -> Either Text UTCTime -> IO (Either AppError Task)
 setTaskDate conn taskId (Right date) = do
   beforeTask <- taskById conn taskId
   case beforeTask of
@@ -132,7 +134,7 @@ setTaskDate conn taskId (Right date) = do
     Right _ -> do
       execute conn "UPDATE tasks SET timestamp = ? WHERE id = ?" (date, taskId)
       taskById conn taskId
-setTaskDate _ _ (Left x) = return $ Left x
+setTaskDate _ _ (Left x) = return $ Left $ AppError x
 
 createTask :: Connection -> Task -> IO ()
 createTask conn = execute conn "INSERT INTO tasks (task, ninja, category, checked) VALUES (?,?,?,?)"
@@ -184,23 +186,16 @@ runServer = do
       case myParams of
         [("input", input)] -> do
           taskBool <- liftIO $ flipTask conn taskId (textToBool $ decimal input)
-          case taskBool of
-            Left x -> json $ AppError x
-            Right x -> json x
+          either json json taskBool
         [("date", date)] -> do
           taskDate <- liftIO $ setTaskDate conn taskId (dateToUTC $ unpack date)
-          case taskDate of
-            Left x -> json $ AppError x
-            Right x -> json x
+          either json json taskDate
         _ -> json $ AppError "Either query parameter isn't working!"
     get "/tasks/:id" $ do
       taskId <- pathParam "id"
       task <- liftIO $ taskById conn taskId
-      case task of
-        Left x -> do
-          status status404
-          json $ AppError x
-        Right x -> json x
+      when (isLeft task) (status status404)
+      either json json task
     delete "/tasks/:id" $ do
       taskId <- pathParam "id"
       liftIO $ deleteTask conn taskId
