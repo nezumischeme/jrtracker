@@ -152,10 +152,11 @@ createUser conn ninja = do
     then do
       csvData <- BL.readFile "assignments.csv"
       case C.decode C.HasHeader csvData of
-        Left err -> putStrLn err
-        Right v -> V.forM_ v $ \(name, category) ->
-          createUndoneTask conn name ninja category
-      return $ AppError "Success!"
+        Left err -> return $ AppError $ pack err
+        Right v -> do
+          V.forM_ v $ \(name, category) ->
+            createUndoneTask conn name ninja category
+          return $ AppError "Success!"
     else return $ AppError "User already exists!"
 
 deleteTask :: Connection -> Int -> IO ()
